@@ -185,6 +185,7 @@ make の中で実行されている anthoscli は gcloud の中に入ってる�
 gcloud config set project <YOUR PROJECT NAME>
 # Kubeflow Pipeline はリージョナルクラスタでうまく動かないらしいのでzoneクラスタで行う
 # https://github.com/kubeflow/gcp-blueprints/issues/6
+# あえてmanagement clusterと違うリージョンにデプロイしてみる
 gcloud config set compute/zone asia-northeast1-c
 # kubeflowとmanagement clusterの設定をいれる
 KF_NAME=dousu-kubeflow-test
@@ -257,4 +258,32 @@ https://cloud.google.com/kubernetes-engine/docs/how-to/gpus#installing_drivers
 ```sh
 # kube-systemにdaemonsetがはいる
 kubectl --context $KF_NAME apply -f https://raw.githubusercontent.com/GoogleCloudPlatform/container-engine-accelerators/master/nvidia-driver-installer/cos/daemonset-preloaded.yaml
+```
+
+# Using Your Own Domain
+
+Cloud Shell での作業
+
+https://www.kubeflow.org/docs/gke/custom-domain/
+
+# Enabling TPU and GPU
+
+https://www.kubeflow.org/docs/gke/pipelines/enable-gpu-and-tpu/
+
+# Pipelines on GCP
+
+https://www.kubeflow.org/docs/gke/pipelines/
+
+# Clean Up
+
+```sh
+KF_DIR=~/kf-deployments/${KF_NAME}
+cd $KF_DIR
+make delete-gcp
+MGMT_DIR=~/kf-deployments-kubeflow/management
+cd $MGMT_DIR
+make delete-cluster
+MANAGED_PROJECT=$GOOGLE_CLOUD_PROJECT
+# serviceAccountの前にdeletedとついているのを確認
+gcloud projects get-iam-policy $MANAGED_PROJECT
 ```
