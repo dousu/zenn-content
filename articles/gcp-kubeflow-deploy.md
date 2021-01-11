@@ -185,7 +185,7 @@ make の中で実行されている anthoscli は gcloud の中に入ってる�
 gcloud config set project <YOUR PROJECT NAME>
 # Kubeflow Pipeline はリージョナルクラスタでうまく動かないらしいのでzoneクラスタで行う
 # https://github.com/kubeflow/gcp-blueprints/issues/6
-gcloud config set compute/zone asia-northeast1-b
+gcloud config set compute/zone asia-northeast1-c
 # kubeflowとmanagement clusterの設定をいれる
 KF_NAME=dousu-kubeflow-test
 KF_PROJECT="${GOOGLE_CLOUD_PROJECT}"
@@ -198,9 +198,11 @@ cd "${KF_DIR}"
 make get-pkg
 # kpt の変数確認
 kpt cfg list-setters .
-# NVIDIA Tesla K80 が使えるか調べる (T4 しか使えなさそうだった)
+# NVIDIA Tesla K80 が使えるか調べる (参照: https://cloud.google.com/compute/docs/gpus )
+# GPUは N1 汎用タイプでだけ使えるので注意
 gcloud compute accelerator-types list
-# ひとまずエラーが出るかそのままやってみる
+# T4 しか使えなさそうだったのでtesla-k80で検索して該当場所をt4に置換 (これを設定せずmake applyした場合は一旦make delete-gcpで作り直す)
+sed "s/nvidia-tesla-k80/nvidia-tesla-t4/" upstream/manifests/gcp/v2/cnrm/cluster/cluster.yaml
 # Makefile の set-values で<hoge>となっている部分を環境変数に合わせて書く
 # kubectl の設定 (namespaceのデフォルト設定をしていないといけないらしい)および management cluster で namespace を作成する
 kubectl config use-context "${MGMTCTXT}"
@@ -218,7 +220,7 @@ make apply
 # "unknown field "env" in v1alpha1.ProxyConfig"というエラーが出た．ASM は istioctl のバージョンが違うらしい
 # https://github.com/kubeflow/manifests/issues/1490
 # istioctl をインストール
-mkdir asm-istio; cd asm-istio
+mkdir ~/asm-istio; cd ~/asm-istio
 # ASM のサービスアカウントがあることを確認 (先述のASM初期化ステップで作られているはず)
 gcloud projects get-iam-policy ${PROJECT_ID} | grep -B 1 'roles/meshdataplane.serviceAgent'
 curl -LO https://storage.googleapis.com/gke-release/asm/istio-1.4.10-asm.18-linux.tar.gz
@@ -247,3 +249,12 @@ echo https://$HOST
 ```
 
 default-profile が表示されれば OK
+
+試しに Nvidia GPU が 1 つの Jupyter Notebook Server を Web UI から作成してみると，GPU 付のノードプールが自動で作られるのを確認した．
+そのあと，GPU ドライバが必要になるので以下を参考にインストールする．
+https://cloud.google.com/kubernetes-engine/docs/how-to/gpus#installing_drivers
+
+```sh
+# kube-systemにdaemonsetがはいる
+kubectl --context $KF_NAME apply -f https://raw.githubusercontent.com/GoogleCloudPlatform/container-engine-accelerators/master/nvidia-driver-installer/cos/daemonset-preloaded.yaml
+```
