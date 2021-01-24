@@ -1,12 +1,13 @@
 ---
-title: "Kubeflowお試し"
+title: "KubeflowをGCPで一通り試してみる"
 emoji: "🐈"
 type: "tech" # tech: 技術記事 / idea: アイデア
 topics: ["gcp", "kubeflow", "gke", "anthos"]
 published: false
 ---
 
-以下を一通りやってみる
+以下を一通りやってみたが，結構はまるポイントや何故そうしているのかわからないまま進める感じになってハードルが高そうだったので，
+自分が試してうまくいった手順をまとめてみました．
 https://www.kubeflow.org/docs/gke/deploy/
 
 # Set up Google Cloud Project
@@ -16,7 +17,7 @@ Cloud Shell での作業 (free tier ではなく paid account で実施)
 ```sh
 gcloud config set project <YOUR PROJECT NAME>
 gcloud config set compute/region asia-northeast1
-gcloud services enable compute.googleapis.com container.googleapis.com iam.googleapis.com servicemanagement.googleapis.com cloudresourcemanager.googleapis.com ml.googleapis.com meshconfig.googleapis.com
+gcloud services enable compute.googleapis.com container.googleapis.com iam.googleapis.com servicemanagement.googleapis.com cloudresourcemanager.googleapis.com ml.googleapis.com meshconfig.googleapis.com tpu.googleapis.com
 ```
 
 Anthos サービスメッシュを初期化する工程を行う (https://cloud.google.com/service-mesh/docs/archive/1.4/docs/gke-install-new-cluster#setting_credentials_and_permissions)．
@@ -27,21 +28,21 @@ curl --request POST --header "Authorization: Bearer $(gcloud auth print-access-t
 
 Identity Pool does not exist っていわれた．どうやら temporary な GKE がいるらしい．
 https://github.com/kubeflow/website/issues/2121
-先述のドキュメントを参考にして最低限のリソースで temporary な GKE を用意する (前提条件は 2 つ，vcpu が４つ以上のマシンタイプの 4 ノード以上の構成と wrorkload-pool 設定)．
+先述のドキュメントを参考にして最低限のリソースで temporary な GKE を用意する (前提条件は 2 つ，vcpu が 4 つ以上のマシンタイプの 4 ノード以上の構成と wrorkload-pool 設定)．
 
 ```sh
 gcloud container clusters create temp-gke --machine-type=e2-standard-4 --num-nodes=4 --enable-ip-alias --release-channel regular --workload-pool=${GOOGLE_CLOUD_PROJECT}.svc.id.goog --labels=mesh_id="proj-$(gcloud projects describe ${GOOGLE_CLOUD_PROJECT} --format="value(projectNumber)")"
 ```
 
-CPUS_ALL_REGIONS が 32 で 48 が必要だったので以下のように申請した．
+CPUS_ALL_REGIONS が 32 で 48 が必要だったので以下のように申請した (後から気づいたがゾーンクラスタであれば 16 でいいはず)．
 https://cloud.google.com/compute/quotas#requesting_additional_quota
-asia-northeast1 の CPUS が 24 で 48 が必要だったので同じように申請した (上の CPUS_ALL_REGIONS もこれで更新されるので申請はこれに集約できた)．
-asia-northeast1 の IN_USE_ADDRESSES が 8 で 12 が必要だったので同じように申請した．
+asia-northeast1 の CPUS が 24 で 48 が必要だったので同じように申請した (結果的に上の CPUS_ALL_REGIONS もこれで更新されるので申請はこれだけでよかった)．
+asia-northeast1 の IN_USE_ADDRESSES が 8 で 12 が必要だったので同じように申請した (これもリージョンクラスタになっていたからで本当であれば 4 でいい)．
 上記コマンド再実行した．
 
 ```sh
 gcloud container clusters create temp-gke --machine-type=e2-standard-4 --num-nodes=4 --enable-ip-alias --release-channel regular --workload-pool=${GOOGLE_CLOUD_PROJECT}.svc.id.goog --labels=mesh_id="proj-$(gcloud projects describe ${GOOGLE_CLOUD_PROJECT} --format="value(projectNumber)")"
-# 上記申請で結構でかいクラスタだなと思ったら regional の gke だったので各 zone で--num-nodes=4 が必要で asia-northeast1 は 3zones があるため 12 ノードのクラスタになっていたためだった
+# 上記申請で結構でかいクラスタだなと思ったら regional の gke だったので各 zone で--num-nodes=4 が必要で asia-northeast1 は 3 zones があるため 12 ノードのクラスタになっていたためだった
 # 一応 zone 設定も書いておく
 gcloud config set compute/zone asia-northeast1-b
 # パブリックに出ている GKE の認証を一応確認しておく (上の zone 設定をしたので region を指定しないと zone で探してしまうので注意)
@@ -131,15 +132,15 @@ yq --version
 gcloud config set project <YOUR PROJECT NAME>
 gcloud config set compute/zone asia-northeast1-b
 # management clusterの設定
-MGMT_PROJECT=$GOOGLE_CLOUD_PROJECT
+MGMT_PROJECT=${GOOGLE_CLOUD_PROJECT}
 MGMT_DIR=~/kf-deployments-kubeflow/management
-MGMT_NAME="${GOOGLE_CLOUD_PROJECT}"
+MGMT_NAME=${GOOGLE_CLOUD_PROJECT}
 LOCATION=asia-northeast1-b
-mkdir -p $MGMT_DIR
+mkdir -p ${MGMT_DIR}
 # management clusterのコードを取得
 # 以下コマンドで failed to set とでるが後で設定するのでいったん無視 (後で設定するので)
 kpt pkg get https://github.com/kubeflow/gcp-blueprints.git/management@v1.2.0 ${MGMT_DIR}
-cd $MGMT_DIR
+cd ${MGMT_DIR}
 make get-pkg
 # 以下で instance/Kptfile と upstream/management/Kptfile に設定が入る (実行ディレクトリ以下の設定の全リストを得るには `kpt cfg list-setters .` を実行する)
 kpt cfg set -R . name "${MGMT_NAME}"
@@ -164,14 +165,14 @@ make hydrate-kcc
 make apply-kcc
 # 管理対象のプロジェクトでの権限を付与する．
 # 今回は managed project は同じプロジェクトでやる
-MANAGED_PROJECT=$GOOGLE_CLOUD_PROJECT
+MANAGED_PROJECT=${GOOGLE_CLOUD_PROJECT}
 # いったん IAM 確認 (*-cnrm-system@*みたいなサービスアカウントがないことを確認)
-gcloud projects get-iam-policy $MANAGED_PROJECT
+gcloud projects get-iam-policy ${MANAGED_PROJECT} | grep -A 5 -B 5 cnrm-system
 # Kptfileに管理対象のプロジェクト (managed project)を設定する
 kpt cfg set ./instance managed-project "${MANAGED_PROJECT}"
 # サービスアカウントの作成と設定を行う
 gcloud beta anthos apply ./instance/managed-project/iam.yaml
-gcloud projects get-iam-policy $MANAGED_PROJECT
+gcloud projects get-iam-policy ${MANAGED_PROJECT} | grep -A 5 -B 5 cnrm-system
 ```
 
 ここら辺の手順が kubeflow のリポジトリに依存しており微妙な気がしてきた．
@@ -186,29 +187,64 @@ gcloud config set project <YOUR PROJECT NAME>
 # Kubeflow Pipeline はリージョナルクラスタでうまく動かないらしいのでzoneクラスタで行う
 # https://github.com/kubeflow/gcp-blueprints/issues/6
 # あえてmanagement clusterと違うリージョンにデプロイしてみる
-gcloud config set compute/zone asia-northeast1-c
+gcloud config set compute/zone us-central1-b
 # kubeflowとmanagement clusterの設定をいれる
 KF_NAME=dousu-kubeflow-test
-KF_PROJECT="${GOOGLE_CLOUD_PROJECT}"
+KF_PROJECT=${GOOGLE_CLOUD_PROJECT}
 KF_DIR=~/kf-deployments/${KF_NAME}
-MGMT_NAME="${GOOGLE_CLOUD_PROJECT}"
-MGMTCTXT="${MGMT_NAME}"
-mkdir -p $KF_DIR
-kpt pkg get https://github.com/kubeflow/gcp-blueprints.git/kubeflow@v1.2.0 `dirname "${KF_DIR}"`
-cd "${KF_DIR}"
+MGMT_NAME=${GOOGLE_CLOUD_PROJECT}
+MGMTCTXT=${MGMT_NAME}
+LOCATION=us-central1-b
+# kubectl の設定 (namespaceのデフォルト設定をしていないといけないらしい)および management cluster で namespace を作成する
+kubectl config use-context ${MGMTCTXT}
+kubectl create namespace ${KF_PROJECT}
+kubectl config set-context --current --namespace ${KF_PROJECT}
+mkdir -p ${KF_DIR}
+kpt pkg get https://github.com/kubeflow/gcp-blueprints.git/kubeflow@v1.2.0 ${KF_DIR}
+cd ${KF_DIR}
 make get-pkg
 # kpt の変数確認
 kpt cfg list-setters .
 # NVIDIA Tesla K80 が使えるか調べる (参照: https://cloud.google.com/compute/docs/gpus )
 # GPUは N1 汎用タイプでだけ使えるので注意
-gcloud compute accelerator-types list
-# T4 しか使えなさそうだったのでtesla-k80で検索して該当場所をt4に置換 (これを設定せずmake applyした場合は一旦make delete-gcpで作り直す)
-sed "s/nvidia-tesla-k80/nvidia-tesla-t4/" upstream/manifests/gcp/v2/cnrm/cluster/cluster.yaml
+gcloud compute accelerator-types list | grep ${LOCATION}
+# T4 しか使えない場合は以下スクリプトでtesla-k80で検索して該当場所をt4に置換 (これを設定せずmake applyした場合は一旦make delete-gcpで作り直す)
+# sed -i "s/nvidia-tesla-k80/nvidia-tesla-t4/" upstream/manifests/gcp/v2/cnrm/cluster/cluster.yaml
+# TPUを使えないか以下を試してみたが，結果的に「GKE の Istio アドオンを使ってないためか VPC_NATIVE にするとうまくいかない」だった
+# TPUを使えるようにspecに以下を追加する (/20は適当なrangeで妥当性はない 参照: https://cloud.google.com/config-connector/docs/reference/resource-docs/container/containercluster ).
+# apiVersion: container.cnrm.cloud.google.com/v1beta1
+# kind: ContainerCluster
+# metadata:
+#   name: dousu-kubeflow-test # {"$kpt-set":"name"}
+# spec:
+#   enableTpu: true
+#   ipAllocationPolicy:
+#     clusterIpv4CidrBlock: /20
+#     servicesIpv4CidrBlock: /20
+touch ./instance/kustomize/gcp_config/cluster.yaml
+cloudshell edit ./instance/kustomize/gcp_config/cluster.yaml
+# kustomizeでパッチを当てる (上記で作ったファイルを加える)
+# patchesStrategicMerge:
+# - cluster.yaml
+cloudshell edit ./instance/kustomize/gcp_config/kustomization.yaml
+# GKEのバージョンによるかもしれないが，TPU使うためにVPCネイティブにするとノードでNodePortを受け取れなくなる
+# blueprintがNodePort前提になっているので今回のスコープではNodePortで受け取れるようにする方向で修正する
+# istio-ingressgateway Serviceのannotationsに以下の設定を加える
+# apiVersion: v1
+# kind: Service
+# metadata:
+#   name: istio-ingressgateway
+#   annotations:
+#     cloud.google.com/neg: '{"ingress": false}'
+touch ./instance/kustomize/iap-ingress/istio-ingressgateway-service.yaml
+cloudshell edit ./instance/kustomize/iap-ingress/istio-ingressgateway-service.yaml
+# kustomizeでパッチを当てる (上記で作ったファイルを加える)
+# patchesStrategicMerge:
+# - istio-ingressgateway-service.yaml
+cloudshell edit ./instance/kustomize/iap-ingress/kustomization.yaml
 # Makefile の set-values で<hoge>となっている部分を環境変数に合わせて書く
-# kubectl の設定 (namespaceのデフォルト設定をしていないといけないらしい)および management cluster で namespace を作成する
-kubectl config use-context "${MGMTCTXT}"
-kubectl create namespace "${KF_PROJECT}"
-kubectl config set-context --current --namespace "${KF_PROJECT}"
+# TODO: sedでかく
+cloudshell edit Makefile
 # IAP の認証情報を入力する
 # 先述のステップで設定済みなので以下で取得
 # https://console.cloud.google.com/apis/credentials
@@ -216,24 +252,25 @@ export CLIENT_ID=<Your CLIENT_ID>
 export CLIENT_SECRET=<Your CLIENT_SECRET>
 # Kptfile に変数をセット
 make set-values
-# Kubeflow をデプロイ
-make apply
+# この時点で Kubeflow をデプロイして失敗した
+# make apply
 # "unknown field "env" in v1alpha1.ProxyConfig"というエラーが出た．ASM は istioctl のバージョンが違うらしい
 # https://github.com/kubeflow/manifests/issues/1490
 # istioctl をインストール
 mkdir ~/asm-istio; cd ~/asm-istio
 # ASM のサービスアカウントがあることを確認 (先述のASM初期化ステップで作られているはず)
-gcloud projects get-iam-policy ${PROJECT_ID} | grep -B 1 'roles/meshdataplane.serviceAgent'
+gcloud projects get-iam-policy ${GOOGLE_CLOUD_PROJECT} | grep -B 5 -A 5 'roles/meshdataplane.serviceAgent'
 curl -LO https://storage.googleapis.com/gke-release/asm/istio-1.4.10-asm.18-linux.tar.gz
 tar xzf istio-1.4.10-asm.18-linux.tar.gz
-cd istio-\*/
-export PATH=$PWD/bin:$PATH
+cd istio-*/
+export PATH=${PWD}/bin:${PATH}
 # バージョンが*-asm.*になっていることを確認する
 istioctl version
 # kubeflow のデプロイを再実行
-cd "${KF_DIR}"
-# webhook.cert-manager.io が unavailable だったり，Application の kind がなくてエラーが出たりした場合は make apply を再実行する (Image と Profile でも出たが再実行した)
-make apply
+cd ${KF_DIR}
+# webhook.cert-manager.io が unavailable だったり，Application の kind がなくてエラーが出たりした場合は make apply を再実行する (実際には Application とImage と Profile で出たが再実行した)
+# 2021/01/16時点では安定して4回実行すればインストール完了する
+make apply; make apply; make apply; make apply
 # デプロイした kubeflow クラスタを確認
 # コンテキストが変わっていることを確認
 kubectl config get-contexts
@@ -245,20 +282,31 @@ kubectl -n istio-system get ingress
 # アクセス先を取得
 export HOST=$(kubectl -n istio-system get ingress envoy-ingress -o=jsonpath={.spec.rules[0].host})
 # 以下にブラウザでアクセスできる．
-echo https://$HOST
+echo https://${HOST}
 # IAP で Google の認証に飛ぶので権限を与えた Email アドレスでアクセスする．
 ```
 
-default-profile が表示されれば OK
+20 分くらい待ってからブラウザでアクセスして default-profile が表示されれば OK．
+
+アクセスできない場合は以下を確認する．
+
+- Kubernetes のワークロードで異常なステータスがないか ( https://console.cloud.google.com/kubernetes/workload )
+- ロードバランサからのヘルスチェックができるようにファイアウォールルールが設定されているか (参考: https://cloud.google.com/load-balancing/docs/health-checks?hl=ja#fw-rule)
+- `kubectl -n istio-system describe ingress envoy-ingress`で証明書が not found になっていないか等を確認する (割り当ての上限で作成できないこともある．デフォルトは 10 個なので[ロードバランサの設定](https://console.cloud.google.com/net-services/loadbalancing/advanced/sslCertificates/list)から確認する)
 
 試しに Nvidia GPU が 1 つの Jupyter Notebook Server を Web UI から作成してみると，GPU 付のノードプールが自動で作られるのを確認した．
 そのあと，GPU ドライバが必要になるので以下を参考にインストールする．
 https://cloud.google.com/kubernetes-engine/docs/how-to/gpus#installing_drivers
 
 ```sh
+KF_NAME=dousu-kubeflow-test
 # kube-systemにdaemonsetがはいる
-kubectl --context $KF_NAME apply -f https://raw.githubusercontent.com/GoogleCloudPlatform/container-engine-accelerators/master/nvidia-driver-installer/cos/daemonset-preloaded.yaml
+kubectl --context ${KF_NAME} apply -f https://raw.githubusercontent.com/GoogleCloudPlatform/container-engine-accelerators/master/nvidia-driver-installer/cos/daemonset-preloaded.yaml
 ```
+
+上記でひととおり blueprint を使ったデプロイが終了した．
+終わってみて kubeflow には istio とワークロードアイデンティティで権限管理が自分でできれば blueprint を使わずにたてれそうだと感じた．
+だが，実際に建てようとすると各コンポーネントを一つ一つ理解しないといけなくて時間の都合上あきらめた．
 
 # Using Your Own Domain
 
@@ -266,24 +314,34 @@ Cloud Shell での作業
 
 https://www.kubeflow.org/docs/gke/custom-domain/
 
-# Enabling TPU and GPU
-
-https://www.kubeflow.org/docs/gke/pipelines/enable-gpu-and-tpu/
-
 # Pipelines on GCP
 
 https://www.kubeflow.org/docs/gke/pipelines/
 
+[パイプライン API リファレンス](https://www.kubeflow.org/docs/pipelines/reference/)
+
 # Clean Up
 
 ```sh
+KF_NAME=dousu-kubeflow-test
 KF_DIR=~/kf-deployments/${KF_NAME}
-cd $KF_DIR
+cd ${KF_DIR}
 make delete-gcp
+kubectl config delete-context $KF_NAME
+MGMT_NAME=${GOOGLE_CLOUD_PROJECT}
 MGMT_DIR=~/kf-deployments-kubeflow/management
-cd $MGMT_DIR
+cd ${MGMT_DIR}
 make delete-cluster
-MANAGED_PROJECT=$GOOGLE_CLOUD_PROJECT
+kubectl config delete-context ${MGMT_NAME}
+MANAGED_PROJECT=${GOOGLE_CLOUD_PROJECT}
 # serviceAccountの前にdeletedとついているのを確認
-gcloud projects get-iam-policy $MANAGED_PROJECT
+gcloud projects get-iam-policy ${MANAGED_PROJECT}
 ```
+
+# 将来的に加筆および調査事項
+
+- goog ドメインは完全に謎 (identity namespace と関連付けて作られてそう？)
+- ASM と config connector が便利そうな説明と図。config connector が対応しているリソースリスト
+- kubeflow での権限設定調べる (profile でわけて namespace 毎にサービスアカウントを作成して workload identity する)
+- private クラスタにすれば外から悪意あるイメージを入れるのはできなくなるが、はいられても権限なくて何もできないが良さそう
+- pipeline を使ったチュートリアル
