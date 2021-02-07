@@ -133,7 +133,7 @@ gcloud config set project <YOUR PROJECT NAME>
 gcloud config set compute/zone asia-northeast1-b
 # management clusterの設定
 MGMT_PROJECT=${GOOGLE_CLOUD_PROJECT}
-MGMT_DIR=~/kf-deployments-kubeflow/management
+MGMT_DIR=~/kf-deployments/management
 MGMT_NAME=${GOOGLE_CLOUD_PROJECT}
 LOCATION=asia-northeast1-b
 mkdir -p ${MGMT_DIR}
@@ -166,7 +166,7 @@ make apply-kcc
 # 管理対象のプロジェクトでの権限を付与する．
 # 今回は managed project は同じプロジェクトでやる
 MANAGED_PROJECT=${GOOGLE_CLOUD_PROJECT}
-# いったん IAM 確認 (*-cnrm-system@*みたいなサービスアカウントがないことを確認)
+# 一旦 IAM 確認 (*-cnrm-system@*みたいなサービスアカウントがないことを確認)
 gcloud projects get-iam-policy ${MANAGED_PROJECT} | grep -A 5 -B 5 cnrm-system
 # Kptfileに管理対象のプロジェクト (managed project)を設定する
 kpt cfg set ./instance managed-project "${MANAGED_PROJECT}"
@@ -177,7 +177,7 @@ gcloud projects get-iam-policy ${MANAGED_PROJECT} | grep -A 5 -B 5 cnrm-system
 
 ここら辺の手順が kubeflow のリポジトリに依存しており微妙な気がしてきた．
 make の中で実行されている anthoscli は gcloud の中に入ってる気がする... (手順が古くなっている可能性がある)
-公式の ASM や Config Connector のインストール方法に従った方が良いかもしれない．
+公式の ASM や Config Connector のインストール方法に従った方が良いかもしれないという懸念もある．
 結論としては，management cluster とは要するに Config Connector が設定されたクラスタ (適切な権限設定も含む)があればよさそう．
 
 # Deploy using kubectl and kpt
@@ -215,18 +215,18 @@ gcloud compute accelerator-types list | grep ${LOCATION}
 # apiVersion: container.cnrm.cloud.google.com/v1beta1
 # kind: ContainerCluster
 # metadata:
-#   name: dousu-kubeflow-test # {"$kpt-set":"name"}
+#   name: ${KF_NAME} # {"$kpt-set":"name"}
 # spec:
 #   enableTpu: true
 #   ipAllocationPolicy:
 #     clusterIpv4CidrBlock: /20
 #     servicesIpv4CidrBlock: /20
-touch ./instance/kustomize/gcp_config/cluster.yaml
-cloudshell edit ./instance/kustomize/gcp_config/cluster.yaml
+touch ./instance/gcp_config/cluster.yaml
+cloudshell edit ./instance/gcp_config/cluster.yaml
 # kustomizeでパッチを当てる (上記で作ったファイルを加える)
 # patchesStrategicMerge:
 # - cluster.yaml
-cloudshell edit ./instance/kustomize/gcp_config/kustomization.yaml
+cloudshell edit ./instance/gcp_config/kustomization.yaml
 # GKEのバージョンによるかもしれないが，TPU使うためにVPCネイティブにするとノードでNodePortを受け取れなくなる
 # blueprintがNodePort前提になっているので今回のスコープではNodePortで受け取れるようにする方向で修正する
 # istio-ingressgateway Serviceのannotationsに以下の設定を加える
@@ -311,8 +311,76 @@ kubectl --context ${KF_NAME} apply -f https://raw.githubusercontent.com/GoogleCl
 # Using Your Own Domain
 
 Cloud Shell での作業
-
 https://www.kubeflow.org/docs/gke/custom-domain/
+
+以下の二点は Cloud Shell 外で行ってください．
+
+- DNS レコードに kubeflow への Static IP を解決するためのレコード追加
+-
+
+```sh
+gcloud config set project <YOUR PROJECT NAME>
+gcloud config set compute/zone us-central1-b
+KF_NAME=dousu-kubeflow-test
+KF_PROJECT=${GOOGLE_CLOUD_PROJECT}
+KF_DIR=~/kf-deployments/${KF_NAME}
+MGMT_NAME=${GOOGLE_CLOUD_PROJECT}
+MGMTCTXT=${MGMT_NAME}
+LOCATION=us-central1-b
+cd ${KF_DIR}
+# substを削除
+kpt cfg delete-subst instance hostname
+# setterを作成
+kpt cfg create-setter instance/ hostname --field "data.hostname" --value ""
+# ドメイン名を設定する
+# これによりManagedCertificateリソースのドメインが書き換わる
+kpt cfg set ./instance hostname <your domain>
+# jwtのaudienceを削除する
+# apiVersion: authentication.istio.io/v1alpha1
+# kind: Policy
+# metadata:
+#   name: ingress-jwt
+#   namespace: istio-system
+# spec:
+#   origins:
+#   - jwt:
+#       issuer: https://cloud.google.com/iap
+#       jwksUri: https://www.gstatic.com/iap/verify/public_key-jwk
+#       jwtHeaders:
+#       - x-goog-iap-jwt-assertion
+#       trigger_rules:
+#       - excluded_paths:
+#         - exact: /healthz/ready
+touch ./instance/kustomize/iap-ingress/ingress-jwt.yaml
+cloudshell edit ./instance/kustomize/iap-ingress/ingress-jwt.yaml
+# kustomizeでパッチを当てる (上記で作ったファイルを加える)
+# patchesStrategicMerge:
+# - ingress-jwt.yaml
+cloudshell edit ./instance/kustomize/iap-ingress/kustomization.yaml
+# makeが失敗するので環境変数とistioを設定する
+export CLIENT_ID=<Your CLIENT_ID>
+export CLIENT_SECRET=<Your CLIENT_SECRET>
+cd ~/asm-istio/istio-*/
+export PATH=${PWD}/bin:${PATH}
+cd ${KF_DIR}
+# 変更を確認
+make hydrate-kubeflow
+# 変更を適用
+make apply-kubeflow
+# 状態を確認 (hostnameが設定したドメインになっていることを確認する)
+kubectl -n istio-system describe ingresses
+# ManagedCertificateも書き換わっていることを確認する
+kubectl -n istio-system describe managedcertificate gke-certificate
+# jwtのaudienceが設定されていることを確認する
+kubectl -n istio-system describe policy ingress-jwt
+# IPアドレスを確認
+# このIPアドレスを指定したドメインでDNSレコードを設定しておく
+IPNAME=${KF_NAME}-ip
+gcloud compute addresses describe ${IPNAME} --global
+# 証明書のステータスがPROVISIONINGからACTIVEになったら使用できます
+# https://console.cloud.google.com/net-services/loadbalancing/advanced/sslCertificates/list
+# audienceが空欄でうまく動かない
+```
 
 # Pipelines on GCP
 
@@ -329,13 +397,15 @@ cd ${KF_DIR}
 make delete-gcp
 kubectl config delete-context $KF_NAME
 MGMT_NAME=${GOOGLE_CLOUD_PROJECT}
-MGMT_DIR=~/kf-deployments-kubeflow/management
+MGMT_DIR=~/kf-deployments/management
 cd ${MGMT_DIR}
 make delete-cluster
 kubectl config delete-context ${MGMT_NAME}
 MANAGED_PROJECT=${GOOGLE_CLOUD_PROJECT}
 # serviceAccountの前にdeletedとついているのを確認
 gcloud projects get-iam-policy ${MANAGED_PROJECT}
+# DNSレコードからkubeflowへのAレコードを消しておく
+# 証明書が残っているので必要でなければ削除する
 ```
 
 # 将来的に加筆および調査事項
@@ -345,3 +415,5 @@ gcloud projects get-iam-policy ${MANAGED_PROJECT}
 - kubeflow での権限設定調べる (profile でわけて namespace 毎にサービスアカウントを作成して workload identity する)
 - private クラスタにすれば外から悪意あるイメージを入れるのはできなくなるが、はいられても権限なくて何もできないが良さそう
 - pipeline を使ったチュートリアル
+- your domain 使った場合に audience が空欄になっている
+  - kf-deployments/dousu-kubeflow-test/instance/kustomize/iap-ingress でパッチする
