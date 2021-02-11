@@ -1,9 +1,9 @@
 ---
-title: "KubeflowをGCPで一通り試してみる"
+title: "KubeflowをGCPで一通り試してみる時の完全ガイド"
 emoji: "🐈"
 type: "tech" # tech: 技術記事 / idea: アイデア
-topics: ["gcp", "kubeflow", "gke", "anthos"]
-published: false
+topics: ["gcp", "kubernetes", "kubeflow", "gke", "anthos"]
+published: true
 ---
 
 以下を一通りやってみたが，結構はまるポイントや何故そうしているのかわからないまま進める感じになってハードルが高そうだったので，
@@ -20,7 +20,8 @@ gcloud config set compute/region asia-northeast1
 gcloud services enable compute.googleapis.com container.googleapis.com iam.googleapis.com servicemanagement.googleapis.com cloudresourcemanager.googleapis.com ml.googleapis.com meshconfig.googleapis.com tpu.googleapis.com
 ```
 
-Anthos サービスメッシュを初期化する工程を行う (https://cloud.google.com/service-mesh/docs/archive/1.4/docs/gke-install-new-cluster#setting_credentials_and_permissions)．
+Anthos サービスメッシュを初期化する工程を行う．
+https://cloud.google.com/service-mesh/docs/archive/1.4/docs/gke-install-new-cluster#setting_credentials_and_permissions)
 
 ```sh
 curl --request POST --header "Authorization: Bearer $(gcloud auth print-access-token)" --data '' https://meshconfig.googleapis.com/v1alpha1/projects/${GOOGLE_CLOUD_PROJECT}:initialize
@@ -58,7 +59,7 @@ kubectl get nodes
 kubectl config view
 ```
 
-auth-provider に gcloud コマンドが設定されているので自分のメールアドレスで k8s では認証されていそう．
+auth-provider に gcloud コマンドが設定されているので自分の Google アカウントで k8s では認証されていそう．
 https://cloud.google.com/kubernetes-engine/docs/how-to/cluster-access-for-kubectl#authentication
 上記を読むと，gcloud container clusters create した時点で kubeconfig に書き込まれているらしい (つまり，上記の gcloud container clusters get-credentials はいらなかった)．
 
@@ -68,7 +69,7 @@ kubectl get clusterrolebinding cluster-admin -o json
 ```
 
 system:masters という group に cluster-admin がバインドされている．
-system:からはじまるグループはデフォルトで検出されるシステムのようだった．基本的には IAM で管理されるのもシステム側で IAM に権限が振られていたら特定のグループに入れるような形で実現していそう．
+system:からはじまるグループはデフォルトで検出されるようだった．基本的には GKE の権限を IAM で管理できるのもシステム側で IAM に権限が振られていたら特定のグループに入れるような形で実現していそう．
 以下はそれを拡張したサービスと思われる Google グループへの k8s での権限付与の説明
 https://cloud.google.com/kubernetes-engine/docs/how-to/role-based-access-control#google-groups-for-gke
 
@@ -97,7 +98,7 @@ https://youtu.be/6p5IqnqHiAE?t=840
 以下にアクセスして OAuth 同意画面の設定をする (おそらくこのプロジェクトで共通の OAuth 2.0 の窓口となるので設定してある場合は必要ない)
 https://console.cloud.google.com/apis/credentials/consent
 
-```text
+```
 User Type: 外部
 アプリ名: Kubeflow
 ユーザサポートメール: 自分のメールアドレス
@@ -111,16 +112,18 @@ scope: 設定しない
 https://console.cloud.google.com/apis/credentials
 OAuth クライアント ID の作成を行う
 
-```text
+```
 アプリケーションの種類: ウェブアプリケーション
 アプリケーションの名前: ウェブ クライアント kubeflow
 承認済みの JavaScript 生成元: 設定しない
 承認済みドメイン: https://iap.googleapis.com/v1/oauth/clientIds/<CLIENT_ID>:handleRedirect
 ```
 
-CLIENT_ID は XXX.apps.googleusercontent.com の形式の ID
+CLIENT_ID は XXX.apps.googleusercontent.com という形式になる．
 
 # Management cluster set up
+
+Kubeflow のクラスタをデプロイするための Management クラスタ ([GKE Config-Connector](https://cloud.google.com/config-connector/docs/overview)で GCP のリソースを k8s マニフェストで管理できるクラスタ)を構築する．
 
 Cloud Shell での作業
 
@@ -136,6 +139,7 @@ MGMT_PROJECT=${GOOGLE_CLOUD_PROJECT}
 MGMT_DIR=~/kf-deployments/management
 MGMT_NAME=${GOOGLE_CLOUD_PROJECT}
 LOCATION=asia-northeast1-b
+
 mkdir -p ${MGMT_DIR}
 # management clusterのコードを取得
 # 以下コマンドで failed to set とでるが後で設定するのでいったん無視 (後で設定するので)
@@ -175,12 +179,15 @@ gcloud beta anthos apply ./instance/managed-project/iam.yaml
 gcloud projects get-iam-policy ${MANAGED_PROJECT} | grep -A 5 -B 5 cnrm-system
 ```
 
-ここら辺の手順が kubeflow のリポジトリに依存しており微妙な気がしてきた．
+ここら辺の手順が kubeflow のリポジトリに依存しており微妙な気がしてきた (Config Connector はアドオンで簡単にインストール可能)．
 make の中で実行されている anthoscli は gcloud の中に入ってる気がする... (手順が古くなっている可能性がある)
-公式の ASM や Config Connector のインストール方法に従った方が良いかもしれないという懸念もある．
 結論としては，management cluster とは要するに Config Connector が設定されたクラスタ (適切な権限設定も含む)があればよさそう．
 
 # Deploy using kubectl and kpt
+
+Management クラスタを使って Kubeflow がインストールされたクラスタをデプロイする．
+
+Cloud Shell での作業
 
 ```sh
 gcloud config set project <YOUR PROJECT NAME>
@@ -194,7 +201,7 @@ KF_PROJECT=${GOOGLE_CLOUD_PROJECT}
 KF_DIR=~/kf-deployments/${KF_NAME}
 MGMT_NAME=${GOOGLE_CLOUD_PROJECT}
 MGMTCTXT=${MGMT_NAME}
-LOCATION=us-central1-b
+LOCATION=us-central1-a
 # kubectl の設定 (namespaceのデフォルト設定をしていないといけないらしい)および management cluster で namespace を作成する
 kubectl config use-context ${MGMTCTXT}
 kubectl create namespace ${KF_PROJECT}
@@ -280,13 +287,13 @@ gcloud projects add-iam-policy-binding "${KF_PROJECT}" --member=user:<EMAIL> --r
 # kubeflow の ingress を確認
 kubectl -n istio-system get ingress
 # アクセス先を取得
-export HOST=$(kubectl -n istio-system get ingress envoy-ingress -o=jsonpath={.spec.rules[0].host})
+HOST=$(kubectl -n istio-system get ingress envoy-ingress -o=jsonpath={.spec.rules[0].host})
 # 以下にブラウザでアクセスできる．
 echo https://${HOST}
 # IAP で Google の認証に飛ぶので権限を与えた Email アドレスでアクセスする．
 ```
 
-20 分くらい待ってからブラウザでアクセスして default-profile が表示されれば OK．
+20 分くらい (ドメイン設定した場合は経験的に 1 時間くらい)待ってからブラウザでアクセスして default-profile が表示されれば OK．
 
 アクセスできない場合は以下を確認する．
 
@@ -294,7 +301,7 @@ echo https://${HOST}
 - ロードバランサからのヘルスチェックができるようにファイアウォールルールが設定されているか (参考: https://cloud.google.com/load-balancing/docs/health-checks?hl=ja#fw-rule)
 - `kubectl -n istio-system describe ingress envoy-ingress`で証明書が not found になっていないか等を確認する (割り当ての上限で作成できないこともある．デフォルトは 10 個なので[ロードバランサの設定](https://console.cloud.google.com/net-services/loadbalancing/advanced/sslCertificates/list)から確認する)
 
-試しに Nvidia GPU が 1 つの Jupyter Notebook Server を Web UI から作成してみると，GPU 付のノードプールが自動で作られるのを確認した．
+試しに Nvidia GPU が 1 つの Jupyter Notebook Server を Web UI から作成してみると，GPU 付のノードプールが自動で作られるのを確認した (GPU 付のノードは結構ゾーン自体のリソース不足で立てられないことが多いので[インスタンスグループ](https://console.cloud.google.com/compute/instanceGroups/list)にエラーが出ていないか確認する)．
 そのあと，GPU ドライバが必要になるので以下を参考にインストールする．
 https://cloud.google.com/kubernetes-engine/docs/how-to/gpus#installing_drivers
 
@@ -308,15 +315,16 @@ kubectl --context ${KF_NAME} apply -f https://raw.githubusercontent.com/GoogleCl
 終わってみて kubeflow には istio とワークロードアイデンティティで権限管理が自分でできれば blueprint を使わずにたてれそうだと感じた．
 だが，実際に建てようとすると各コンポーネントを一つ一つ理解しないといけなくて時間の都合上あきらめた．
 
+パイプラインをカスタマイズしたい場合は[パイプライン API リファレンス](https://www.kubeflow.org/docs/pipelines/reference/)を参照するとよさそう．
+
 # Using Your Own Domain
 
 Cloud Shell での作業
 https://www.kubeflow.org/docs/gke/custom-domain/
 
-以下の二点は Cloud Shell 外で行ってください．
+以下は Cloud Shell 外で作業してください．
 
 - DNS レコードに kubeflow への Static IP を解決するためのレコード追加
--
 
 ```sh
 gcloud config set project <YOUR PROJECT NAME>
@@ -335,7 +343,8 @@ kpt cfg create-setter instance/ hostname --field "data.hostname" --value ""
 # ドメイン名を設定する
 # これによりManagedCertificateリソースのドメインが書き換わる
 kpt cfg set ./instance hostname <your domain>
-# jwtのaudienceを削除する
+# jwtのaudienceを削除する または 変更する
+# 参考: https://cloud.google.com/iap/docs/signed-headers-howto?hl=ja#verifying_the_jwt_payload
 # apiVersion: authentication.istio.io/v1alpha1
 # kind: Policy
 # metadata:
@@ -344,6 +353,8 @@ kpt cfg set ./instance hostname <your domain>
 # spec:
 #   origins:
 #   - jwt:
+#       # audiences:
+#       # - /projects/{PROJECT_NUMBER}/global/backendServices/{SERVICE_ID} # ここでも取得できます https://console.cloud.google.com/security/iap
 #       issuer: https://cloud.google.com/iap
 #       jwksUri: https://www.gstatic.com/iap/verify/public_key-jwk
 #       jwtHeaders:
@@ -360,8 +371,10 @@ cloudshell edit ./instance/kustomize/iap-ingress/kustomization.yaml
 # makeが失敗するので環境変数とistioを設定する
 export CLIENT_ID=<Your CLIENT_ID>
 export CLIENT_SECRET=<Your CLIENT_SECRET>
+# 以下は先述のistioの設定に依存しているので適宜書き換える
 cd ~/asm-istio/istio-*/
 export PATH=${PWD}/bin:${PATH}
+
 cd ${KF_DIR}
 # 変更を確認
 make hydrate-kubeflow
@@ -371,7 +384,7 @@ make apply-kubeflow
 kubectl -n istio-system describe ingresses
 # ManagedCertificateも書き換わっていることを確認する
 kubectl -n istio-system describe managedcertificate gke-certificate
-# jwtのaudienceが設定されていることを確認する
+# jwtのaudienceが設定されていないことを確認する
 kubectl -n istio-system describe policy ingress-jwt
 # IPアドレスを確認
 # このIPアドレスを指定したドメインでDNSレコードを設定しておく
@@ -379,14 +392,14 @@ IPNAME=${KF_NAME}-ip
 gcloud compute addresses describe ${IPNAME} --global
 # 証明書のステータスがPROVISIONINGからACTIVEになったら使用できます
 # https://console.cloud.google.com/net-services/loadbalancing/advanced/sslCertificates/list
-# audienceが空欄でうまく動かない
+# audienceがデフォルトのTO_BE_PATCHEDだとうまく動かなかったので注意
 ```
 
-# Pipelines on GCP
+# Tutorial on GCP
 
-https://www.kubeflow.org/docs/gke/pipelines/
+以下を参照したが，基本的に[MINIST のノートブック](https://github.com/kubeflow/examples/blob/master/mnist/mnist_gcp.ipynb)に従うだけだったので割愛
 
-[パイプライン API リファレンス](https://www.kubeflow.org/docs/pipelines/reference/)
+https://www.kubeflow.org/docs/gke/gcp-e2e/
 
 # Clean Up
 
@@ -405,15 +418,7 @@ MANAGED_PROJECT=${GOOGLE_CLOUD_PROJECT}
 # serviceAccountの前にdeletedとついているのを確認
 gcloud projects get-iam-policy ${MANAGED_PROJECT}
 # DNSレコードからkubeflowへのAレコードを消しておく
-# 証明書が残っているので必要でなければ削除する
+# 以下はあんまり費用に関わらないが地味にかかるので消しておいた方がいいもの
+# - 証明書が残っているので必要でなければ削除する https://console.cloud.google.com/net-services/loadbalancing/advanced/sslCertificates/list
+# - Compute EngineのDisksが残っているので必要なければ削除する https://console.cloud.google.com/compute/disks
 ```
-
-# 将来的に加筆および調査事項
-
-- goog ドメインは完全に謎 (identity namespace と関連付けて作られてそう？)
-- ASM と config connector が便利そうな説明と図。config connector が対応しているリソースリスト
-- kubeflow での権限設定調べる (profile でわけて namespace 毎にサービスアカウントを作成して workload identity する)
-- private クラスタにすれば外から悪意あるイメージを入れるのはできなくなるが、はいられても権限なくて何もできないが良さそう
-- pipeline を使ったチュートリアル
-- your domain 使った場合に audience が空欄になっている
-  - kf-deployments/dousu-kubeflow-test/instance/kustomize/iap-ingress でパッチする
